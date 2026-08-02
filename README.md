@@ -6,7 +6,7 @@ Version: 1.7.2. [Release details](RELEASES.md).
 
 ![frames](.assets/download_success.png)
 
-
+Forked from https://github.com/tropicoo/yt-dlp-bot.git
 ## Support the development
 
 - [Buy me a coffee](https://www.buymeacoffee.com/terletsky)

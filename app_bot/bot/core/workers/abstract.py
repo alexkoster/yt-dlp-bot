@@ -56,7 +56,7 @@ class AbstractDownloadResultWorker(AbstractTask):
         # TODO: Use discriminator.
         for schema_cls in self.SCHEMA_CLS:
             try:
-                return schema_cls.model_validate_json(message.body)
+                return schema_cls.model_validate_json(message.body.decode())
             except Exception:  # noqa: S110
                 # TODO: Use pydantic discriminator.
                 # Skip unmatched schema class that failed to parse the body.

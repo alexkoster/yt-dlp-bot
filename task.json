@@ -1,0 +1,17 @@
+{
+  "_comment" : "https://stackoverflow.com/questions/244777/can-comments-be-used-in-json",
+  "label": "docker-compose-start",
+  "type": "shell",
+  "command": "docker compose up --build -d -t 0 && docker compose logs --tail 100 -f",
+  "isBackground": true,
+  "problemMatcher": [
+    {
+      "pattern": [{ "regexp": ".", "file": 1, "location": 2, "message": 3, }],
+      "background": {
+        "activeOnStart": true,
+        "beginsPattern": "^(Building py-service)$",
+        "endsPattern": "^(Creating|Recreating|Starting) (py-container) ... (done)$",
+      }
+    },
+  ],
+},

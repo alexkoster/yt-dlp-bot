@@ -1,0 +1,15 @@
+{
+    "_comment" : "https://stackoverflow.com/questions/244777/can-comments-be-used-in-json",
+    "name": "run py",
+    "type": "python",
+    "request": "attach",
+    "preLaunchTask": "docker-compose-start",
+    "pathMappings": [
+        {
+            "localRoot": "${workspaceFolder}/python/src/",
+            "remoteRoot": "/work/"
+        }
+    ],
+    "port": 5678,
+    "host": "127.0.0.1"
+},
