@@ -37,8 +37,8 @@ class ProgressDownloadHandler(AbstractDownloadHandler):
         eta = self._body.format_eta()
 
         return (
-            f'⏬ {bold(f"Downloading: {pct}%")}\n'
+            f'⏬ {bold(f"Downloading: ETA {eta} {pct}%")}\n'
             f'{emoji_bar}\n'
             f'📦 {bold("Downloaded:")} {downloaded} / {total}\n'
-            f'⚡ {bold("Speed:")} {speed} | ⏳ {bold("ETA:")} {eta}'
+            f'⚡ {bold("Speed:")} {speed}'
         )

@@ -1,11 +1,13 @@
 import asyncio
+import time
 from abc import ABC, abstractmethod
-from collections.abc import Coroutine
+from collections.abc import Callable, Coroutine
 from itertools import chain
 from typing import TYPE_CHECKING
 
 from pydantic import ConfigDict, FilePath
 from pyrogram.enums import ChatAction, MessageMediaType, ParseMode
+from pyrogram.errors import MessageIdInvalid, MessageNotModified
 from pyrogram.types import Animation, Message
 from pyrogram.types import Audio as _Audio
 from pyrogram.types import Video as _Video
@@ -15,6 +17,7 @@ from yt_shared.repositories.task import TaskRepository
 from yt_shared.schemas.base import RealBaseModel
 from yt_shared.schemas.cache import CacheSchema
 from yt_shared.schemas.media import BaseMedia, Video
+from yt_shared.schemas.progress import ProgressUploadPayload
 from yt_shared.schemas.success import SuccessDownloadPayload
 from yt_shared.utils.tasks.abstract import AbstractTask
 from yt_shared.utils.tasks.tasks import create_task
@@ -49,6 +52,7 @@ class AudioUploadContext(BaseUploadContext):
 
 class AbstractUploadTask(AbstractTask, ABC):
     _UPLOAD_ACTION: ChatAction
+    _PROGRESS_UPDATE_INTERVAL_SEC = 2.0
 
     def __init__(
         self,
@@ -73,6 +77,11 @@ class AbstractUploadTask(AbstractTask, ABC):
 
         self._forward_chat_ids = self._get_forward_chat_ids()
         self._cached_message: Message | None = None
+
+        self._chat_status_message_ids: dict[int, int] = {}
+
+        self._upload_start_times: dict[int, float] = {}
+        self._last_update_times: dict[int, float] = {}
 
     async def run(self) -> None:
         async with self._semaphore:
@@ -100,6 +109,7 @@ class AbstractUploadTask(AbstractTask, ABC):
             f'📏 {bold("Size")} {self._media_object.file_size_human()}'
         )
         coros = []
+        users_to_send = []
         for user in self._users:
             if not is_user_upload_silent(user=user, conf=self._bot.conf):
                 kwargs = {
@@ -110,7 +120,12 @@ class AbstractUploadTask(AbstractTask, ABC):
                 if self._ctx.message_id:
                     kwargs['reply_to_message_id'] = self._ctx.message_id
                 coros.append(self._bot.send_message(**kwargs))
-        await asyncio.gather(*coros)
+                users_to_send.append(user.id)
+        if coros:
+            results = await asyncio.gather(*coros, return_exceptions=True)
+            for user_id, res in zip(users_to_send, results, strict=False):
+                if isinstance(res, Message):
+                    self._chat_status_message_ids[user_id] = res.id
 
     def _get_forward_chat_ids(self) -> list[int]:
         forward_chat_ids = []
@@ -126,10 +141,79 @@ class AbstractUploadTask(AbstractTask, ABC):
     @retry(wait=wait_fixed(3), stop=stop_after_attempt(3), reraise=True)
     async def __upload(self, chat_id: int) -> Message | None:
         self._log.debug('Uploading to "%d" with context: %s', chat_id, self._media_ctx)
-        return await self._generate_send_media_coroutine(chat_id)
+
+        async def progress_callback(current: int, total: int) -> None:
+            await self._on_upload_progress(current, total, chat_id)
+
+        return await self._generate_send_media_coroutine(
+            chat_id=chat_id, progress_callback=progress_callback
+        )
+
+    async def _on_upload_progress(
+        self, current: int, total: int, chat_id: int
+    ) -> None:
+        now = time.monotonic()
+        is_finished = current >= total
+        last_update_time = self._last_update_times.get(chat_id, 0.0)
+
+        if not is_finished and (
+            now - last_update_time < self._PROGRESS_UPDATE_INTERVAL_SEC
+        ):
+            return
+
+        self._last_update_times[chat_id] = now
+
+        start_time = self._upload_start_times.get(chat_id, now)
+        elapsed = now - start_time
+        speed = current / elapsed if elapsed > 0 else 0.0
+        eta = (total - current) / speed if speed > 0 else 0
+
+        payload = ProgressUploadPayload(
+            uploaded_bytes=current,
+            total_bytes=total,
+            speed=speed,
+            eta=eta,
+            filename=self._filename,
+        )
+
+        self._log.info(
+            'Uploading "%s" to chat %d: %s %s%% (%s / %s) at %s ETA %s',
+            self._filename,
+            chat_id,
+            payload.format_ascii_progress_bar(),
+            payload.percent,
+            payload.format_uploaded(),
+            payload.format_total(),
+            payload.format_speed(),
+            payload.format_eta(),
+        )
+
+        target_msg_id = self._chat_status_message_ids.get(chat_id)
+        if target_msg_id:
+            text = (
+                f'⬆️ {bold(f"Uploading: ETA {payload.format_eta()} {payload.percent}%")}\n'
+                f'{payload.format_emoji_progress_bar()}\n'
+                f'📄 {bold("File:")} {self._filename}\n'
+                f'📦 {bold("Uploaded:")} {payload.format_uploaded()} / {payload.format_total()}\n'
+                f'⚡ {bold("Speed:")} {payload.format_speed()}'
+            )
+            try:
+                await self._bot.edit_message_text(
+                    chat_id=chat_id,
+                    message_id=target_msg_id,
+                    text=text,
+                )
+            except (MessageIdInvalid, MessageNotModified) as err:
+                self._log.warning(
+                    'Could not edit upload progress message id "%s": %s',
+                    target_msg_id,
+                    err,
+                )
 
     @abstractmethod
-    def _generate_send_media_coroutine(self, chat_id: int) -> Coroutine:
+    def _generate_send_media_coroutine(
+        self, chat_id: int, progress_callback: Callable | None = None
+    ) -> Coroutine:
         pass
 
     @abstractmethod
@@ -138,6 +222,7 @@ class AbstractUploadTask(AbstractTask, ABC):
 
     async def _upload_file(self) -> None:
         for chat_id in chain((u.id for u in self._users), self._forward_chat_ids):
+            self._upload_start_times[chat_id] = time.monotonic()
             self._log.info(
                 'Uploading "%s" [%s] [cached: %s] to chat id "%d"',
                 self._filename,
@@ -191,7 +276,9 @@ class AudioUploadTask(AbstractUploadTask):
     _UPLOAD_ACTION = ChatAction.UPLOAD_AUDIO
     _media_ctx: AudioUploadContext
 
-    def _generate_send_media_coroutine(self, chat_id: int) -> Coroutine:
+    def _generate_send_media_coroutine(
+        self, chat_id: int, progress_callback: Callable | None = None
+    ) -> Coroutine:
         kwargs = {
             'chat_id': chat_id,
             'audio': self._media_ctx.filepath,
@@ -199,6 +286,8 @@ class AudioUploadTask(AbstractUploadTask):
             'file_name': self._media_ctx.filename,
             'duration': int(self._media_ctx.duration),
         }
+        if progress_callback:
+            kwargs['progress'] = progress_callback
         return self._bot.send_audio(**kwargs)
 
     def _create_media_context(self) -> AudioUploadContext:
@@ -271,7 +360,9 @@ class VideoUploadTask(AbstractUploadTask):
             caption_items.append(self._media_object.file_size_human())
         return caption_items
 
-    def _generate_send_media_coroutine(self, chat_id: int) -> Coroutine:
+    def _generate_send_media_coroutine(
+        self, chat_id: int, progress_callback: Callable | None = None
+    ) -> Coroutine:
         kwargs = {
             'chat_id': chat_id,
             'caption': self._media_ctx.caption,
@@ -281,6 +372,8 @@ class VideoUploadTask(AbstractUploadTask):
             'width': int(self._media_ctx.width),
             'parse_mode': ParseMode.DISABLED,
         }
+        if progress_callback:
+            kwargs['progress'] = progress_callback
 
         if self._media_ctx.thumb:
             kwargs['thumb'] = self._media_ctx.thumb

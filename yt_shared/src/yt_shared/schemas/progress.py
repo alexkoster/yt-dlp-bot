@@ -8,22 +8,22 @@ from yt_shared.schemas.base_rabbit import BaseRabbitDownloadPayload
 from yt_shared.utils.common import format_bytes
 
 
-class ProgressDownloadPayload(BaseRabbitDownloadPayload):
-    """Payload representing download progress status."""
+from yt_shared.schemas.base import RealBaseModel
 
-    type: Literal[RabbitPayloadType.PROGRESS] = RabbitPayloadType.PROGRESS
-    task_id: uuid.UUID | None = None
-    downloaded_bytes: int = 0
-    total_bytes: int | None = None
-    speed: float | None = None
-    eta: int | float | None = None
-    status: StrictStr = 'downloading'
-    filename: StrictStr | None = None
+
+class BaseProgressMixin:
+    total_bytes: int | None
+    speed: float | None
+    eta: int | float | None
+
+    @property
+    def current_bytes(self) -> int:
+        raise NotImplementedError
 
     @property
     def percent(self) -> float:
         if self.total_bytes and self.total_bytes > 0:
-            return round((self.downloaded_bytes / self.total_bytes) * 100, 1)
+            return round((self.current_bytes / self.total_bytes) * 100, 1)
         return 0.0
 
     def format_progress_bar(self, length: int = 10) -> str:
@@ -59,10 +59,47 @@ class ProgressDownloadPayload(BaseRabbitDownloadPayload):
             return f'{mins:02d}:{secs:02d}'
         return 'N/A'
 
-    def format_downloaded(self) -> str:
-        return format_bytes(self.downloaded_bytes)
+    def format_current(self) -> str:
+        return format_bytes(self.current_bytes)
 
     def format_total(self) -> str:
         if self.total_bytes:
             return format_bytes(self.total_bytes)
         return 'N/A'
+
+
+class ProgressDownloadPayload(BaseRabbitDownloadPayload, BaseProgressMixin):
+    """Payload representing download progress status."""
+
+    type: Literal[RabbitPayloadType.PROGRESS] = RabbitPayloadType.PROGRESS
+    task_id: uuid.UUID | None = None
+    downloaded_bytes: int = 0
+    total_bytes: int | None = None
+    speed: float | None = None
+    eta: int | float | None = None
+    status: StrictStr = 'downloading'
+    filename: StrictStr | None = None
+
+    @property
+    def current_bytes(self) -> int:
+        return self.downloaded_bytes
+
+    def format_downloaded(self) -> str:
+        return self.format_current()
+
+
+class ProgressUploadPayload(RealBaseModel, BaseProgressMixin):
+    """Payload representing upload progress status."""
+
+    uploaded_bytes: int = 0
+    total_bytes: int | None = None
+    speed: float | None = None
+    eta: int | float | None = None
+    filename: StrictStr | None = None
+
+    @property
+    def current_bytes(self) -> int:
+        return self.uploaded_bytes
+
+    def format_uploaded(self) -> str:
+        return self.format_current()
