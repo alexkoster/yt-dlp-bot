@@ -1,6 +1,7 @@
 import glob
 import logging
 import shutil
+import time
 from collections.abc import Callable
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -8,9 +9,12 @@ from typing import ClassVar
 
 import yt_dlp
 from yt_shared.enums import DownMediaType
+from yt_shared.rabbit.publisher import RmqPublisher
 from yt_shared.schemas.media import Audio, DownMedia, InbMediaPayload, Video
+from yt_shared.schemas.progress import ProgressPayload
 from yt_shared.utils.common import format_bytes, gen_random_str
 from yt_shared.utils.file import file_size, list_files_human, remove_dir
+from yt_shared.utils.tasks.tasks import create_task
 
 from worker.core.config import settings
 from worker.core.exceptions import MediaDownloaderError
@@ -37,18 +41,25 @@ class MediaDownloader:
         self._tmp_downloaded_dest_dir = (
             settings.TMP_DOWNLOAD_ROOT_PATH / settings.TMP_DOWNLOADED_DIR
         )
+        self._rmq_publisher = RmqPublisher()
 
     def download(
-        self, host_conf: AbstractHostConfig, media_payload: InbMediaPayload
+        self, host_conf: AbstractHostConfig, media_payload: InbMediaPayload, task_id: str | None = None
     ) -> DownMedia:
         try:
-            return self._download(host_conf=host_conf, media_payload=media_payload)
+            return self._download(host_conf=host_conf, media_payload=media_payload, task_id=task_id)
         except Exception:
             self._log.error('Failed to download %s', host_conf.url)
             raise
 
+
+    def _generate_progress_bar(self, percentage: float, length: int = 20) -> str:
+        filled = int((percentage / 100) * length)
+        bar = '█' * filled + '░' * (length - filled)
+        return f'[{bar}] {percentage:.1f}%'
+
     def _download(
-        self, host_conf: AbstractHostConfig, media_payload: InbMediaPayload
+        self, host_conf: AbstractHostConfig, media_payload: InbMediaPayload, task_id: str | None = None
     ) -> DownMedia:
         media_type = media_payload.download_media_type
         url = host_conf.url
@@ -60,6 +71,60 @@ class MediaDownloader:
             ytdl_opts_model = host_conf.build_config(
                 media_type=media_type, curr_tmp_dir=curr_tmp_dir
             )
+
+            last_progress_time = 0.0
+
+            def _progress_hook(d: dict) -> None:
+                nonlocal last_progress_time
+                if d['status'] == 'downloading':
+                    now = time.time()
+                    if now - last_progress_time > 2.0:
+                        last_progress_time = now
+
+                        try:
+                            # Extract stats
+                            percent_str = d.get('_percent_str', '0.0%').strip()
+                            percent = float(percent_str.replace('%', ''))
+                            speed_str = d.get('_speed_str', 'N/A').strip()
+                            eta_str = d.get('_eta_str', 'N/A').strip()
+                            size_str = d.get('_total_bytes_str') or d.get('_total_bytes_estimate_str', 'N/A')
+                            if size_str != 'N/A':
+                                size_str = size_str.strip()
+
+                            progress_bar = self._generate_progress_bar(percent)
+
+                            msg = f'⏬ Downloading: ETA {eta_str} {percent:.1f}%\n{progress_bar}\n\n<b>Size:</b> {size_str}\n<b>Speed:</b> {speed_str}'
+                            self._log.info(f"Download Progress: {msg.replace('\n', ' ')}")
+
+                            # We shouldn't block the progress hook with asyncio calls directly.
+                            # Schedule the RabbitMQ publish task.
+                            if task_id:
+                                progress_payload = ProgressPayload(
+                                    task_id=task_id,
+                                    message=msg,
+                                    context=media_payload,
+                                    from_chat_id=media_payload.from_chat_id,
+                                    from_chat_type=media_payload.from_chat_type,
+                                    from_user_id=media_payload.from_user_id,
+                                    message_id=media_payload.message_id
+                                )
+                                # Ensure we have an event loop available
+                                try:
+                                    import asyncio
+                                    asyncio.get_running_loop()
+                                    create_task(
+                                        self._rmq_publisher.send_progress(progress_payload),
+                                        task_name='PublishDownloadProgress',
+                                        logger=self._log,
+                                    )
+                                except RuntimeError:
+                                    pass # Not in an async context, can't easily publish progress.
+
+                        except Exception as e:
+                            self._log.warning('Failed to parse yt-dlp progress: %s', e)
+
+
+            ytdl_opts_model.ytdl_opts['progress_hooks'] = [_progress_hook]
 
             with yt_dlp.YoutubeDL(ytdl_opts_model.ytdl_opts) as ytdl:
                 self._log.info('Downloading "%s" to "%s"', url, curr_tmp_dir)

@@ -1,4 +1,5 @@
 import asyncio
+import time
 from abc import ABC, abstractmethod
 from collections.abc import Coroutine
 from itertools import chain
@@ -16,6 +17,7 @@ from yt_shared.schemas.base import RealBaseModel
 from yt_shared.schemas.cache import CacheSchema
 from yt_shared.schemas.media import BaseMedia, Video
 from yt_shared.schemas.success import SuccessDownloadPayload
+from yt_shared.utils.common import format_bytes
 from yt_shared.utils.tasks.abstract import AbstractTask
 from yt_shared.utils.tasks.tasks import create_task
 
@@ -99,7 +101,8 @@ class AbstractUploadTask(AbstractTask, ABC):
             f'⬆️ {bold("Uploading")} {self._filename}\n'
             f'📏 {bold("Size")} {self._media_object.file_size_human()}'
         )
-        coros = []
+
+        self._upload_message = None
         for user in self._users:
             if not is_user_upload_silent(user=user, conf=self._bot.conf):
                 kwargs = {
@@ -109,8 +112,68 @@ class AbstractUploadTask(AbstractTask, ABC):
                 }
                 if self._ctx.message_id:
                     kwargs['reply_to_message_id'] = self._ctx.message_id
-                coros.append(self._bot.send_message(**kwargs))
-        await asyncio.gather(*coros)
+
+                msg = await self._bot.send_message(**kwargs)
+                if not self._upload_message:
+                    self._upload_message = msg
+
+    def _generate_progress_bar(self, percentage: float, length: int = 20) -> str:
+        filled = int((percentage / 100) * length)
+        bar = '█' * filled + '░' * (length - filled)
+        return f'[{bar}] {percentage:.1f}%'
+
+    def _get_progress_callback(self):
+        last_progress_time = 0.0
+        start_time = time.time()
+
+        async def progress(current, total):
+            nonlocal last_progress_time
+            now = time.time()
+            if now - last_progress_time > 2.0 or current == total:
+                last_progress_time = now
+                if total > 0:
+                    percent = (current / total) * 100
+                else:
+                    percent = 0.0
+
+                progress_bar = self._generate_progress_bar(percent)
+
+                elapsed = now - start_time
+                if elapsed > 0 and current > 0:
+                    speed_bps = current / elapsed
+                    speed = format_bytes(int(speed_bps)) + '/s'
+
+                    if total and total > current:
+                        eta_seconds = (total - current) / speed_bps
+                        m, s = divmod(int(eta_seconds), 60)
+                        h, m = divmod(m, 60)
+                        if h > 0:
+                            eta = f'{h:02d}:{m:02d}:{s:02d}'
+                        else:
+                            eta = f'{m:02d}:{s:02d}'
+                    else:
+                        eta = '00:00'
+                else:
+                    speed = 'N/A'
+                    eta = 'N/A'
+
+                msg = f"⬆️ Uploading: ETA {eta} {percent:.1f}%\n{progress_bar}\n\n<b>Size:</b> {format_bytes(current)} / {format_bytes(total) if total else 'Unknown'}\n<b>Speed:</b> {speed}"
+
+                self._log.info(f"Upload Progress: {msg.replace('\n', ' ')}")
+
+                if hasattr(self, '_upload_message') and self._upload_message:
+                    try:
+                        from pyrogram.errors import MessageNotModified
+                        await self._bot.edit_message_text(
+                            chat_id=self._upload_message.chat.id,
+                            message_id=self._upload_message.id,
+                            text=msg,
+                        )
+                    except MessageNotModified:
+                        pass
+                    except Exception as e:
+                        self._log.warning('Failed to edit upload progress message: %s', e)
+        return progress
 
     def _get_forward_chat_ids(self) -> list[int]:
         forward_chat_ids = []
@@ -199,6 +262,8 @@ class AudioUploadTask(AbstractUploadTask):
             'file_name': self._media_ctx.filename,
             'duration': int(self._media_ctx.duration),
         }
+        if not self._media_ctx.is_cached:
+            kwargs['progress'] = self._get_progress_callback()
         return self._bot.send_audio(**kwargs)
 
     def _create_media_context(self) -> AudioUploadContext:
@@ -286,10 +351,14 @@ class VideoUploadTask(AbstractUploadTask):
             kwargs['thumb'] = self._media_ctx.thumb
         if self._media_ctx.type is MessageMediaType.ANIMATION:
             kwargs['animation'] = self._media_ctx.filepath
+            if not self._media_ctx.is_cached:
+                kwargs['progress'] = self._get_progress_callback()
             return self._bot.send_animation(**kwargs)
 
         kwargs['video'] = self._media_ctx.filepath
         kwargs['supports_streaming'] = True
+        if not self._media_ctx.is_cached:
+            kwargs['progress'] = self._get_progress_callback()
         return self._bot.send_video(**kwargs)
 
     def _cache_data(self, message: Message) -> None:
