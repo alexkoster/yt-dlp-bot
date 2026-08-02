@@ -1,6 +1,8 @@
+import asyncio
 import glob
 import logging
 import shutil
+import time
 from collections.abc import Callable
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -8,7 +10,10 @@ from typing import ClassVar
 
 import yt_dlp
 from yt_shared.enums import DownMediaType
+from yt_shared.models import Task
+from yt_shared.rabbit.publisher import RmqPublisher
 from yt_shared.schemas.media import Audio, DownMedia, InbMediaPayload, Video
+from yt_shared.schemas.progress import ProgressDownloadPayload
 from yt_shared.utils.common import format_bytes, gen_random_str
 from yt_shared.utils.file import file_size, list_files_human, remove_dir
 
@@ -26,6 +31,7 @@ class MediaDownloader:
     _PLAYLIST_TYPE = 'playlist'
     _DESTINATION_TMP_DIR_NAME_LEN = 4
     _KEEP_VIDEO_OPTION = '--keep-video'
+    _PROGRESS_UPDATE_INTERVAL_SEC = 2.0
 
     _EXT_TO_NAME: ClassVar[dict[str, str]] = {
         FINAL_AUDIO_FORMAT: 'audio',
@@ -39,16 +45,29 @@ class MediaDownloader:
         )
 
     def download(
-        self, host_conf: AbstractHostConfig, media_payload: InbMediaPayload
+        self,
+        host_conf: AbstractHostConfig,
+        media_payload: InbMediaPayload,
+        task: Task | None = None,
+        loop: asyncio.AbstractEventLoop | None = None,
     ) -> DownMedia:
         try:
-            return self._download(host_conf=host_conf, media_payload=media_payload)
+            return self._download(
+                host_conf=host_conf,
+                media_payload=media_payload,
+                task=task,
+                loop=loop,
+            )
         except Exception:
             self._log.error('Failed to download %s', host_conf.url)
             raise
 
     def _download(
-        self, host_conf: AbstractHostConfig, media_payload: InbMediaPayload
+        self,
+        host_conf: AbstractHostConfig,
+        media_payload: InbMediaPayload,
+        task: Task | None = None,
+        loop: asyncio.AbstractEventLoop | None = None,
     ) -> DownMedia:
         media_type = media_payload.download_media_type
         url = host_conf.url
@@ -60,12 +79,68 @@ class MediaDownloader:
             ytdl_opts_model = host_conf.build_config(
                 media_type=media_type, curr_tmp_dir=curr_tmp_dir
             )
+            ytdl_opts = ytdl_opts_model.ytdl_opts
 
-            with yt_dlp.YoutubeDL(ytdl_opts_model.ytdl_opts) as ytdl:
-                self._log.info('Downloading "%s" to "%s"', url, curr_tmp_dir)
-                self._log.info(
-                    'Downloading with options: %s', ytdl_opts_model.ytdl_opts
+            rmq_publisher = RmqPublisher()
+            last_update_time = 0.0
+
+            def progress_hook(d: dict) -> None:
+                nonlocal last_update_time
+                status = d.get('status', 'downloading')
+                now = time.monotonic()
+                is_finished = status == 'finished'
+
+                if not is_finished and (
+                    now - last_update_time < self._PROGRESS_UPDATE_INTERVAL_SEC
+                ):
+                    return
+
+                last_update_time = now
+
+                downloaded = d.get('downloaded_bytes', 0)
+                total = d.get('total_bytes') or d.get('total_bytes_estimate')
+                speed = d.get('speed')
+                eta = d.get('eta')
+                filename = (
+                    Path(d.get('filename', '')).name if d.get('filename') else None
                 )
+
+                payload = ProgressDownloadPayload(
+                    task_id=task.id if task else None,
+                    downloaded_bytes=downloaded,
+                    total_bytes=total,
+                    speed=speed,
+                    eta=eta,
+                    status=status,
+                    filename=filename,
+                    context=media_payload,
+                    from_chat_id=media_payload.from_chat_id,
+                    from_chat_type=media_payload.from_chat_type,
+                    from_user_id=media_payload.from_user_id,
+                    message_id=media_payload.message_id,
+                )
+
+                self._log.info(
+                    'Downloading "%s": %s %s%% (%s / %s) at %s ETA %s',
+                    url,
+                    payload.format_ascii_progress_bar(),
+                    payload.percent,
+                    payload.format_downloaded(),
+                    payload.format_total(),
+                    payload.format_speed(),
+                    payload.format_eta(),
+                )
+
+                if loop and loop.is_running():
+                    asyncio.run_coroutine_threadsafe(
+                        rmq_publisher.send_download_progress(payload), loop
+                    )
+
+            ytdl_opts.setdefault('progress_hooks', []).append(progress_hook)
+
+            with yt_dlp.YoutubeDL(ytdl_opts) as ytdl:
+                self._log.info('Downloading "%s" to "%s"', url, curr_tmp_dir)
+                self._log.info('Downloading with options: %s', ytdl_opts)
 
                 meta: dict | None = ytdl.extract_info(url, download=True)
                 if not meta:

@@ -65,10 +65,14 @@ class MediaService:
 
     async def _start_download(self, host_conf: AbstractHostConfig) -> DownMedia:
         try:
-            return await asyncio.get_running_loop().run_in_executor(
+            loop = asyncio.get_running_loop()
+            return await loop.run_in_executor(
                 None,
                 lambda: self._downloader.download(
-                    host_conf=host_conf, media_payload=self._media_payload
+                    host_conf=host_conf,
+                    media_payload=self._media_payload,
+                    task=self._task,
+                    loop=loop,
                 ),
             )
         except Exception as err:

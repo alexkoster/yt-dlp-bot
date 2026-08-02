@@ -23,6 +23,7 @@ class TaskSource(StrChoiceEnum):
 class RabbitPayloadType(StrChoiceEnum):
     DOWNLOAD_ERROR = 'DOWNLOAD_ERROR'
     GENERAL_ERROR = 'GENERAL_ERROR'
+    PROGRESS = 'PROGRESS'
     SUCCESS = 'SUCCESS'
 
 
