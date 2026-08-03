@@ -1,4 +1,4 @@
-FROM python:3.12-alpine3.20
+FROM python:3.14-alpine3.24
 
 ENV VIRTUAL_ENV=/opt/venv
 ENV PATH="/opt/venv/bin:$PATH"
@@ -15,7 +15,7 @@ RUN apk add --no-cache \
 WORKDIR /app
 
 RUN --mount=from=ghcr.io/astral-sh/uv,source=/uv,target=/bin/uv \
-    --mount=type=cache,target=/root/.cache/uv \
-    --mount=type=bind,source=./yt_shared/uv.lock,target=uv.lock \
-    --mount=type=bind,source=./yt_shared/pyproject.toml,target=pyproject.toml \
-    uv venv /opt/venv && uv sync --frozen --no-install-project
+        --mount=type=cache,target=/root/.cache/uv \
+        --mount=type=bind,source=./yt_shared/uv.lock,target=uv.lock \
+        --mount=type=bind,source=./yt_shared/pyproject.toml,target=pyproject.toml \
+        uv venv /opt/venv && uv sync --frozen --no-install-project
