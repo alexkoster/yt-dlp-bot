@@ -67,7 +67,7 @@ services:
       - "5435:5432"
     restart: unless-stopped
     volumes:
-      - pgdata:/var/lib/postgresql/data
+      - pgdata:/var/lib/postgresql
   yt_rabbitmq:
     image: "rabbitmq:4.3-management-alpine"
     container_name: yt_rabbitmq

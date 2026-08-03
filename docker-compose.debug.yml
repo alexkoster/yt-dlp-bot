@@ -82,16 +82,16 @@ services:
       - "shared-tmpfs:/tmp/download_tmpfs"
   yt_postgres:
     container_name: yt_postgres
-    image: "postgres:15"
+    image: "postgres:18"
     env_file:
       - envs/common.env
     ports:
       - "5435:5432"
     restart: unless-stopped
     volumes:
-      - pgdata:/var/lib/postgresql/data
+      - pgdata:/var/lib/postgresql
   yt_rabbitmq:
-    image: "rabbitmq:3.12-management-alpine"
+    image: "rabbitmq:4.3-management-alpine"
     container_name: yt_rabbitmq
     ports:
       - "25672:5672"
