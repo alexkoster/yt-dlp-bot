@@ -71,6 +71,10 @@ services:
   yt_rabbitmq:
     image: "rabbitmq:4.3-management-alpine"
     container_name: yt_rabbitmq
+    command: >
+      sh -c "mkdir -p /etc/rabbitmq/conf.d &&
+             echo 'deprecated_features.permit.management_metrics_collection = true' > /etc/rabbitmq/conf.d/10-deprecated.conf &&
+             exec docker-entrypoint.sh rabbitmq-server"
     ports:
       - "25672:5672"
       - "15672:15672"
