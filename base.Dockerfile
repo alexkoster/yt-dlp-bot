@@ -1,4 +1,4 @@
-FROM python:3.14-alpine3.24
+FROM python:3.13-alpine3.24
 
 ENV VIRTUAL_ENV=/opt/venv
 ENV PATH="/opt/venv/bin:$PATH"
@@ -10,7 +10,13 @@ ENV UV_PYTHON_DOWNLOADS=never
 RUN apk add --no-cache \
         tzdata \
         htop \
-        bash
+        bash \
+        gcc \
+        musl-dev \
+        python3-dev \
+        make \
+        zlib-dev \
+        jpeg-dev
 
 WORKDIR /app
 
