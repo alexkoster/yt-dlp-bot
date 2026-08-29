@@ -68,7 +68,7 @@ class MediaService:
             return await asyncio.get_running_loop().run_in_executor(
                 None,
                 lambda: self._downloader.download(
-                    host_conf=host_conf, media_payload=self._media_payload
+                    host_conf=host_conf, media_payload=self._media_payload, task_id=self._task.id
                 ),
             )
         except Exception as err:
